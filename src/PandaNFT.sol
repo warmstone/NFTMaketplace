@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/* 
+/*
     1. 实现ERC721 ERC721URIStorage Ownable ERC2981
     2. 状态变量：tokenId计数器，最大供应量，铸造价格 0.01 ether
     3. 事件：NFT铸造事件
     4. 方法：铸造NFT，重写tokenURI，检查接口支持，查询总供应量，提取铸造费用，设置铸造价格
 */
-import { ERC721 } from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import { ERC721URIStorage } from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
-import { ERC2981 } from "@openzeppelin/contracts/token/common/ERC2981.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC2981} from "@openzeppelin/contracts/token/common/ERC2981.sol";
 
 /**
  * @title PandaNFT
@@ -60,7 +60,6 @@ contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
         _setTokenRoyalty(tokenId, royalty, royaltyBps);
     }
 
-
     /**
      * @dev 铸造NFT
      * @param uri uri
@@ -94,7 +93,7 @@ contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
         uint256 balance = address(this).balance;
         require(balance > 0, "No balance to withdrwa");
 
-        (bool success, ) = payable(owner()).call{value: balance}("");
+        (bool success,) = payable(owner()).call{value: balance}("");
         require(success, "Withdraw failed");
     }
 
@@ -111,7 +110,7 @@ contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
      * @dev 重写 tokenURI
      * @param tokenId tokenId
      */
-    function tokenURI(uint256 tokenId) public override(ERC721, ERC721URIStorage) view returns (string memory) {
+    function tokenURI(uint256 tokenId) public view override(ERC721, ERC721URIStorage) returns (string memory) {
         return super.tokenURI(tokenId);
     }
 
@@ -119,8 +118,12 @@ contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
      * @dev 重写supportsInterface
      * @param interfaceId 接口Id
      */
-    function supportsInterface(bytes4 interfaceId) public override(ERC721, ERC721URIStorage, ERC2981) view returns (bool) {
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC721, ERC721URIStorage, ERC2981)
+        returns (bool)
+    {
         return super.supportsInterface(interfaceId);
     }
-    
 }
