@@ -8,35 +8,50 @@
 - `NFTMarketplace`：支持固定价格挂单、拍卖、NFT 托管、平台手续费、ERC2981 版税结算和竞拍退款的 NFT 市场合约。
 
 项目使用 OpenZeppelin 合约库作为基础能力，包括 ERC721、ERC721URIStorage、ERC2981、Ownable、Pausable、ReentrancyGuard 和 IERC721Receiver。
+新增的可升级市场合约使用 `openzeppelin-contracts-upgradeable` 中的 `OwnableUpgradeable` 和 `UUPSUpgradeable`，避免手写升级权限和 owner 管理逻辑。
 
 ## 2. 项目结构
 
 ```text
 NFTMarketplace/
-├── .github/
-│   └── workflows/
-│       └── test.yml                  # GitHub Actions 测试流程
-├── .vscode/                          # VS Code 配置
-├── script/
-│   ├── DeployNFTMarketplace.s.sol    # NFTMarketplace 部署脚本
-│   └── DeployPandaNFT.s.sol          # PandaNFT 部署脚本
-├── src/
-│   ├── NFTMarketplace.sol            # NFT 市场合约
-│   └── PandaNFT.sol                  # NFT 铸造合约
-├── test/
-│   ├── NFTMarketplaceTest.t.sol      # 市场合约测试
-│   └── PandaNFTTest.t.sol            # NFT 合约测试
-├── foundry.toml                      # Foundry 配置
-├── foundry.lock                      # 依赖锁定文件
-├── remappings.txt                    # Solidity import 路径映射
-├── TEST_REPORT.md                    # 测试报告
-└── README.md                         # Foundry 默认说明
+|-- .github/
+|   `-- workflows/
+|       `-- test.yml                         # GitHub Actions 测试流程
+|-- .vscode/                                 # VS Code 配置
+|-- script/
+|   |-- DeployChainlinkPriceOracle.s.sol     # Chainlink 预言机部署脚本
+|   |-- DeployNFTMarketplace.s.sol           # NFTMarketplace 部署脚本
+|   |-- DeployNFTMarketplaceUpgradeable.s.sol # UUPS 市场部署脚本
+|   |-- DeployPandaNFT.s.sol                 # PandaNFT 部署脚本
+|   |-- UpgradeNFTMarketplaceToV2.s.sol      # UUPS 市场升级到 V2 的脚本
+|   `-- UpgradeNFTMarketplaceToV3.s.sol      # UUPS 市场升级到 V3 的脚本
+|-- src/
+|   |-- NFTMarketplace.sol                   # NFT 市场合约
+|   |-- PandaNFT.sol                         # NFT 铸造合约
+|   |-- oracle/
+|   |   |-- AggregatorV3Interface.sol        # Chainlink Price Feed 接口
+|   |   `-- ChainlinkPriceOracle.sol         # Chainlink 报价模块
+|   `-- upgradeable/
+|       |-- NFTMarketplaceUpgradeable.sol    # UUPS 可升级市场基础版本
+|       |-- NFTMarketplaceUpgradeableV2.sol  # 支持 ERC20 支付和出价的 V2
+|       `-- NFTMarketplaceUpgradeableV3.sol  # 支持预言机 USD 计价购买的 V3
+|-- test/
+|   |-- ChainlinkPriceOracleTest.t.sol       # 预言机测试
+|   |-- NFTMarketplaceTest.t.sol             # 市场合约测试
+|   |-- NFTMarketplaceUpgradeableTest.t.sol  # UUPS 与 ERC20 市场测试
+|   `-- PandaNFTTest.t.sol                   # NFT 合约测试
+|-- foundry.toml                             # Foundry 配置
+|-- foundry.lock                             # 依赖锁定文件
+|-- remappings.txt                           # Solidity import 路径映射
+|-- TEST_REPORT.md                           # 测试报告
+`-- README.md                                # Foundry 默认说明
 ```
 
 说明：
 
 - `.env` 用于保存本地部署环境变量，已经被 `.gitignore` 忽略，不应提交真实私钥。
 - `lib/`、`cache/`、`out/` 是 Foundry 依赖、缓存和编译产物目录，未在上方展开。
+- `lib/openzeppelin-contracts-upgradeable` 是 OpenZeppelin 可升级合约依赖，当前固定在 `v5.6.1`。
 
 ## 3. 核心功能说明
 
@@ -158,7 +173,7 @@ forge test -vvv
 当前测试结果见 `TEST_REPORT.md`。最近一次测试结果：
 
 ```text
-37 tests passed, 0 failed, 0 skipped
+49 tests passed, 0 failed, 0 skipped
 ```
 
 ## 5. 环境变量
