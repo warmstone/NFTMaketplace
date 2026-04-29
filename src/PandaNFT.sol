@@ -1,72 +1,45 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/*
-    1. 实现ERC721 ERC721URIStorage Ownable ERC2981
-    2. 状态变量：tokenId计数器，最大供应量，铸造价格 0.01 ether
-    3. 事件：NFT铸造事件
-    4. 方法：铸造NFT，重写tokenURI，检查接口支持，查询总供应量，提取铸造费用，设置铸造价格
-*/
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC2981} from "@openzeppelin/contracts/token/common/ERC2981.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title PandaNFT
  * @author warmstone
- * @notice 铸造NFT，设置版税
+ * @notice Mintable ERC721 collection with ERC2981 royalty support.
  */
-contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
-    // tokenId计数器
+contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable, Pausable {
     uint256 private _tokenIdCounter;
-    // 最大供应量
-    uint256 public constant MAX_SUPPLY = 10000;
-    // 铸造价格
+
+    uint256 public constant MAX_SUPPLY = 10_000;
     uint256 public mintPrice = 0.01 ether;
 
-    /**
-     * NFT铸造事件
-     * @param minter 铸造人
-     * @param tokenId tokenId
-     * @param uri uir
-     */
-    event NFTMinted(address indexed minter, uint256 indexed tokenId, string uri);
+    error MaxSupplyReached();
+    error IncorrectPayment();
+    error EmptyTokenURI();
+    error InvalidMintPrice();
+    error NoBalanceToWithdraw();
+    error WithdrawFailed();
+    error TokenDoesNotExist();
 
-    /**
-     * 构造器，设置默认版税
-     */
+    event NFTMinted(address indexed minter, uint256 indexed tokenId, string uri);
+    event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event Withdrawn(address indexed recipient, uint256 amount);
+    event DefaultRoyaltyUpdated(address indexed receiver, uint96 royaltyBps);
+    event TokenRoyaltyUpdated(uint256 indexed tokenId, address indexed receiver, uint96 royaltyBps);
+
     constructor() ERC721("PandaNFT", "PNFT") Ownable(msg.sender) {
-        // 默认版税
         _setDefaultRoyalty(msg.sender, 1000);
     }
 
-    /**
-     * 设置默认版税信息
-     * @param royalty 版税接收地址
-     * @param royaltyBps 版税比例
-     */
-    function setDefaultRoyalty(address royalty, uint96 royaltyBps) external onlyOwner {
-        _setDefaultRoyalty(royalty, royaltyBps);
-    }
-
-    /**
-     * 设置单个NFT版税信息
-     * @param tokenId NFT tokenId
-     * @param royalty 版税接收地址
-     * @param royaltyBps 版税比例
-     */
-    function setTokenRoyalty(uint256 tokenId, address royalty, uint96 royaltyBps) external onlyOwner {
-        _setTokenRoyalty(tokenId, royalty, royaltyBps);
-    }
-
-    /**
-     * @dev 铸造NFT
-     * @param uri uri
-     */
-    function mint(string memory uri) public payable returns (uint256) {
-        require(_tokenIdCounter < MAX_SUPPLY, "Max supply reached");
-        require(msg.value >= mintPrice, "Insufficient payment");
+    function mint(string calldata uri) external payable whenNotPaused returns (uint256) {
+        if (_tokenIdCounter >= MAX_SUPPLY) revert MaxSupplyReached();
+        if (msg.value != mintPrice) revert IncorrectPayment();
+        if (bytes(uri).length == 0) revert EmptyTokenURI();
 
         _tokenIdCounter++;
         uint256 newTokenId = _tokenIdCounter;
@@ -79,45 +52,56 @@ contract PandaNFT is ERC721, ERC721URIStorage, ERC2981, Ownable {
         return newTokenId;
     }
 
-    /**
-     * @dev 查询总供应量
-     */
-    function totalSupply() public view returns (uint256) {
+    function totalSupply() external view returns (uint256) {
         return _tokenIdCounter;
     }
 
-    /**
-     * @dev 提取铸造费用
-     */
-    function withdraw() public onlyOwner {
+    function withdraw() external onlyOwner {
         uint256 balance = address(this).balance;
-        require(balance > 0, "No balance to withdrwa");
+        if (balance == 0) revert NoBalanceToWithdraw();
 
-        (bool success,) = payable(owner()).call{value: balance}("");
-        require(success, "Withdraw failed");
+        address recipient = owner();
+        (bool success,) = payable(recipient).call{value: balance}("");
+        if (!success) revert WithdrawFailed();
+
+        emit Withdrawn(recipient, balance);
     }
 
-    /**
-     * @dev 设置铸造价格
-     * @param newPrice 新铸造价格
-     */
-    function setMintPrice(uint256 newPrice) public onlyOwner {
-        require(newPrice > 0, "MintPrice must great than 0");
+    function setMintPrice(uint256 newPrice) external onlyOwner {
+        if (newPrice == 0) revert InvalidMintPrice();
+
+        uint256 oldPrice = mintPrice;
         mintPrice = newPrice;
+
+        emit MintPriceUpdated(oldPrice, newPrice);
     }
 
-    /**
-     * @dev 重写 tokenURI
-     * @param tokenId tokenId
-     */
+    function setDefaultRoyalty(address royalty, uint96 royaltyBps) external onlyOwner {
+        _setDefaultRoyalty(royalty, royaltyBps);
+
+        emit DefaultRoyaltyUpdated(royalty, royaltyBps);
+    }
+
+    function setTokenRoyalty(uint256 tokenId, address royalty, uint96 royaltyBps) external onlyOwner {
+        if (_ownerOf(tokenId) == address(0)) revert TokenDoesNotExist();
+
+        _setTokenRoyalty(tokenId, royalty, royaltyBps);
+
+        emit TokenRoyaltyUpdated(tokenId, royalty, royaltyBps);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
     function tokenURI(uint256 tokenId) public view override(ERC721, ERC721URIStorage) returns (string memory) {
         return super.tokenURI(tokenId);
     }
 
-    /**
-     * @dev 重写supportsInterface
-     * @param interfaceId 接口Id
-     */
     function supportsInterface(bytes4 interfaceId)
         public
         view

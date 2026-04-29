@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {PandaNFT} from "../src/PandaNFT.sol";
 
 contract PandaNFTTest is Test {
@@ -15,6 +16,10 @@ contract PandaNFTTest is Test {
     string public constant TOKEN_URI = "ipfs://panda-token-uri";
 
     event NFTMinted(address indexed minter, uint256 indexed tokenId, string uri);
+    event MintPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event Withdrawn(address indexed recipient, uint256 amount);
+    event DefaultRoyaltyUpdated(address indexed receiver, uint96 royaltyBps);
+    event TokenRoyaltyUpdated(uint256 indexed tokenId, address indexed receiver, uint96 royaltyBps);
 
     receive() external payable {}
 
@@ -25,13 +30,14 @@ contract PandaNFTTest is Test {
         vm.deal(anotherUser, 10 ether);
     }
 
-    function testDeploymentInitializesMetadataOwnerPriceAndSupply() public view {
+    function testDeploymentInitializesMetadataOwnerPriceSupplyAndPauseState() public view {
         assertEq(pandaNFT.name(), "PandaNFT");
         assertEq(pandaNFT.symbol(), "PNFT");
         assertEq(pandaNFT.owner(), owner);
         assertEq(pandaNFT.mintPrice(), 0.01 ether);
         assertEq(pandaNFT.totalSupply(), 0);
         assertEq(pandaNFT.MAX_SUPPLY(), 10_000);
+        assertFalse(pandaNFT.paused());
     }
 
     function testMintCreatesTokenForSenderAndStoresURI() public {
@@ -51,31 +57,38 @@ contract PandaNFTTest is Test {
     function testMintEmitsNFTMintedEvent() public {
         uint256 mintPrice = pandaNFT.mintPrice();
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, true, false, true, address(pandaNFT));
         emit NFTMinted(user, 1, TOKEN_URI);
 
         vm.prank(user);
         pandaNFT.mint{value: mintPrice}(TOKEN_URI);
     }
 
-    function testMintAllowsOverpayment() public {
-        uint256 mintPrice = pandaNFT.mintPrice();
-
-        vm.prank(user);
-        uint256 tokenId = pandaNFT.mint{value: mintPrice + 1 ether}(TOKEN_URI);
-
-        assertEq(tokenId, 1);
-        assertEq(pandaNFT.ownerOf(tokenId), user);
-        assertEq(address(pandaNFT).balance, mintPrice + 1 ether);
-    }
-
     function testMintRevertsWhenPaymentIsInsufficient() public {
         uint256 insufficientPayment = pandaNFT.mintPrice() - 1;
 
-        vm.expectRevert(bytes("Insufficient payment"));
+        vm.expectRevert(PandaNFT.IncorrectPayment.selector);
 
         vm.prank(user);
         pandaNFT.mint{value: insufficientPayment}(TOKEN_URI);
+    }
+
+    function testMintRevertsWhenPaymentIsTooHigh() public {
+        uint256 excessivePayment = pandaNFT.mintPrice() + 1;
+
+        vm.expectRevert(PandaNFT.IncorrectPayment.selector);
+
+        vm.prank(user);
+        pandaNFT.mint{value: excessivePayment}(TOKEN_URI);
+    }
+
+    function testMintRevertsWhenURIIsEmpty() public {
+        uint256 mintPrice = pandaNFT.mintPrice();
+
+        vm.expectRevert(PandaNFT.EmptyTokenURI.selector);
+
+        vm.prank(user);
+        pandaNFT.mint{value: mintPrice}("");
     }
 
     function testMultipleMintsIncrementTokenIdsAndSupply() public {
@@ -100,8 +113,12 @@ contract PandaNFTTest is Test {
         pandaNFT.tokenURI(1);
     }
 
-    function testOwnerCanSetMintPrice() public {
+    function testOwnerCanSetMintPriceAndEmitEvent() public {
+        uint256 oldMintPrice = pandaNFT.mintPrice();
         uint256 newMintPrice = 0.05 ether;
+
+        vm.expectEmit(false, false, false, true, address(pandaNFT));
+        emit MintPriceUpdated(oldMintPrice, newMintPrice);
 
         pandaNFT.setMintPrice(newMintPrice);
 
@@ -116,7 +133,7 @@ contract PandaNFTTest is Test {
     }
 
     function testSetMintPriceRevertsForZeroPrice() public {
-        vm.expectRevert(bytes("MintPrice must great than 0"));
+        vm.expectRevert(PandaNFT.InvalidMintPrice.selector);
 
         pandaNFT.setMintPrice(0);
     }
@@ -125,7 +142,7 @@ contract PandaNFTTest is Test {
         uint256 newMintPrice = 0.05 ether;
         pandaNFT.setMintPrice(newMintPrice);
 
-        vm.expectRevert(bytes("Insufficient payment"));
+        vm.expectRevert(PandaNFT.IncorrectPayment.selector);
         vm.prank(user);
         pandaNFT.mint{value: 0.01 ether}(TOKEN_URI);
 
@@ -136,13 +153,16 @@ contract PandaNFTTest is Test {
         assertEq(pandaNFT.ownerOf(tokenId), user);
     }
 
-    function testOwnerCanWithdrawMintFees() public {
+    function testOwnerCanWithdrawMintFeesAndEmitEvent() public {
         uint256 mintPrice = pandaNFT.mintPrice();
 
         vm.prank(user);
         pandaNFT.mint{value: mintPrice}(TOKEN_URI);
 
         uint256 ownerBalanceBefore = owner.balance;
+
+        vm.expectEmit(true, false, false, true, address(pandaNFT));
+        emit Withdrawn(owner, mintPrice);
 
         pandaNFT.withdraw();
 
@@ -163,7 +183,7 @@ contract PandaNFTTest is Test {
     }
 
     function testWithdrawRevertsWhenContractHasNoBalance() public {
-        vm.expectRevert(bytes("No balance to withdrwa"));
+        vm.expectRevert(PandaNFT.NoBalanceToWithdraw.selector);
 
         pandaNFT.withdraw();
     }
@@ -177,7 +197,10 @@ contract PandaNFTTest is Test {
         assertEq(royaltyAmount, 0.1 ether);
     }
 
-    function testOwnerCanSetDefaultRoyalty() public {
+    function testOwnerCanSetDefaultRoyaltyAndEmitEvent() public {
+        vm.expectEmit(true, false, false, true, address(pandaNFT));
+        emit DefaultRoyaltyUpdated(royaltyReceiver, 500);
+
         pandaNFT.setDefaultRoyalty(royaltyReceiver, 500);
 
         (address receiver, uint256 royaltyAmount) = pandaNFT.royaltyInfo(1, 2 ether);
@@ -193,11 +216,14 @@ contract PandaNFTTest is Test {
         pandaNFT.setDefaultRoyalty(royaltyReceiver, 500);
     }
 
-    function testOwnerCanSetTokenRoyalty() public {
+    function testOwnerCanSetTokenRoyaltyAndEmitEvent() public {
         uint256 mintPrice = pandaNFT.mintPrice();
 
         vm.prank(user);
         uint256 tokenId = pandaNFT.mint{value: mintPrice}(TOKEN_URI);
+
+        vm.expectEmit(true, true, false, true, address(pandaNFT));
+        emit TokenRoyaltyUpdated(tokenId, royaltyReceiver, 750);
 
         pandaNFT.setTokenRoyalty(tokenId, royaltyReceiver, 750);
 
@@ -205,6 +231,50 @@ contract PandaNFTTest is Test {
 
         assertEq(receiver, royaltyReceiver);
         assertEq(royaltyAmount, 0.15 ether);
+    }
+
+    function testSetTokenRoyaltyRevertsForNonexistentToken() public {
+        vm.expectRevert(PandaNFT.TokenDoesNotExist.selector);
+
+        pandaNFT.setTokenRoyalty(1, royaltyReceiver, 750);
+    }
+
+    function testPausePreventsMinting() public {
+        uint256 mintPrice = pandaNFT.mintPrice();
+
+        pandaNFT.pause();
+
+        assertTrue(pandaNFT.paused());
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(user);
+        pandaNFT.mint{value: mintPrice}(TOKEN_URI);
+    }
+
+    function testOwnerCanUnpauseAndMintingResumes() public {
+        uint256 mintPrice = pandaNFT.mintPrice();
+
+        pandaNFT.pause();
+        pandaNFT.unpause();
+
+        assertFalse(pandaNFT.paused());
+
+        vm.prank(user);
+        uint256 tokenId = pandaNFT.mint{value: mintPrice}(TOKEN_URI);
+
+        assertEq(tokenId, 1);
+    }
+
+    function testPauseAndUnpauseRevertForNonOwner() public {
+        vm.expectRevert();
+        vm.prank(user);
+        pandaNFT.pause();
+
+        pandaNFT.pause();
+
+        vm.expectRevert();
+        vm.prank(user);
+        pandaNFT.unpause();
     }
 
     function testSupportsERC721MetadataAndERC2981Interfaces() public view {
