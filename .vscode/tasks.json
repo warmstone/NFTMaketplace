@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "foundry: build",
+      "type": "shell",
+      "command": "forge build",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "foundry: test",
+      "type": "shell",
+      "command": "forge test -vvv",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "foundry: fmt",
+      "type": "shell",
+      "command": "forge fmt",
+      "problemMatcher": []
+    },
+    {
+      "label": "foundry: anvil",
+      "type": "shell",
+      "command": "anvil",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

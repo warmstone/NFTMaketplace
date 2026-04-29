@@ -1,0 +1,20 @@
+{
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.env.linux": {
+    "PATH": "${env:PATH}:${env:HOME}/.foundry/bin"
+  },
+  "[solidity]": {
+    "editor.defaultFormatter": "NomicFoundation.hardhat-solidity",
+    "editor.formatOnSave": true
+  },
+  "solidity.formatter": "forge",
+  "files.exclude": {
+    "cache/": true,
+    "out/": true
+  },
+  "search.exclude": {
+    "cache/": true,
+    "out/": true,
+    "lib/": true
+  }
+}
