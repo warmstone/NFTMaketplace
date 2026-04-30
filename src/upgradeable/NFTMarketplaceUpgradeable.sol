@@ -2,20 +2,28 @@
 pragma solidity ^0.8.20;
 
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {IERC2981} from "@openzeppelin/contracts/interfaces/IERC2981.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
-/// @notice UUPS upgradeable version of the ETH-based NFT marketplace.
+/// @notice UUPS upgradeable NFT marketplace supporting ETH, ERC20, and Chainlink USD quotes in the first version.
 contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuard, IERC721Receiver {
+    using SafeERC20 for IERC20;
+
     struct Listing {
         address seller;
         address nftContract;
         uint256 tokenId;
+        address tokenAddress;
         uint256 price;
+        bool useUsdPrice;
         bool active;
     }
 
@@ -23,10 +31,18 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
         address seller;
         address nftContract;
         uint256 tokenId;
+        address tokenAddress;
         uint256 startPrice;
         uint256 highestBid;
         address highestBidder;
         uint256 endTime;
+        bool active;
+    }
+
+    struct PriceFeedConfig {
+        AggregatorV3Interface feed;
+        uint8 tokenDecimals;
+        uint256 maxStaleness;
         bool active;
     }
 
@@ -41,6 +57,8 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
     uint256 public auctionCounter;
 
     mapping(uint256 => mapping(address => uint256)) public pendingReturns;
+    mapping(address => bool) public paymentTokenAllowed;
+    mapping(address => PriceFeedConfig) public priceFeeds;
 
     address public feeRecipient;
     uint256 public platformFee;
@@ -64,26 +82,50 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
     error FeeTooHigh();
     error InvalidRoyalty();
     error TransferFailed();
+    error PaymentTokenNotAllowed();
+    error NativeTokenNotAllowed();
+    error PriceFeedNotActive();
+    error InvalidOraclePrice();
+    error StaleOraclePrice();
 
     event NFTListed(
-        uint256 indexed listingId, address indexed seller, address indexed nftContract, uint256 tokenId, uint256 price
+        uint256 indexed listingId,
+        address indexed seller,
+        address indexed nftContract,
+        uint256 tokenId,
+        address tokenAddress,
+        uint256 price,
+        bool useUsdPrice
     );
     event NFTDelisted(uint256 indexed listingId);
     event NFTPriceUpdated(uint256 indexed listingId, uint256 oldPrice, uint256 newPrice);
-    event NFTSold(uint256 indexed listingId, address indexed buyer, address indexed seller, uint256 price);
+    event NFTSold(
+        uint256 indexed listingId,
+        address indexed buyer,
+        address indexed seller,
+        address tokenAddress,
+        uint256 price,
+        uint256 paidAmount
+    );
     event AuctionCreated(
         uint256 indexed auctionId,
         address indexed seller,
         address indexed nftContract,
         uint256 tokenId,
+        address tokenAddress,
         uint256 startPrice,
         uint256 endTime
     );
-    event BidPlaced(uint256 indexed auctionId, address indexed bidder, uint256 bidAmount);
-    event AuctionEnded(uint256 indexed auctionId, address indexed buyer, uint256 price);
-    event BidWithdrawn(uint256 indexed auctionId, address indexed bidder, uint256 amount);
+    event BidPlaced(uint256 indexed auctionId, address indexed bidder, address indexed tokenAddress, uint256 bidAmount);
+    event AuctionEnded(uint256 indexed auctionId, address indexed buyer, address indexed tokenAddress, uint256 price);
+    event BidWithdrawn(uint256 indexed auctionId, address indexed bidder, address indexed tokenAddress, uint256 amount);
     event PlatformFeeUpdated(uint256 oldFee, uint256 newFee);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event PaymentTokenAllowedUpdated(address indexed tokenAddress, bool allowed);
+    event PriceFeedConfigured(
+        address indexed tokenAddress, address indexed feed, uint8 tokenDecimals, uint256 maxStaleness
+    );
+    event PriceFeedDisabled(address indexed tokenAddress);
 
     constructor() {
         _disableInitializers();
@@ -97,23 +139,28 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
         platformFee = 250;
     }
 
-    function listNFT(address nftContract, uint256 tokenId, uint256 price) external nonReentrant returns (uint256) {
-        if (nftContract == address(0)) revert ZeroAddress();
-        if (price == 0) revert InvalidPrice();
+    function version() external pure returns (string memory) {
+        return "1.0.0";
+    }
 
-        IERC721 nft = IERC721(nftContract);
-        if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
-        if (!_isApprovedForMarketplace(nft, msg.sender, tokenId)) revert MarketplaceNotApproved();
+    /// @notice Fixed-price listing paid with ETH when tokenAddress is zero, otherwise with an allowed ERC20 token.
+    function listNFT(address nftContract, uint256 tokenId, address tokenAddress, uint256 price)
+        external
+        nonReentrant
+        returns (uint256)
+    {
+        return _listNFT(nftContract, tokenId, tokenAddress, price, false);
+    }
 
-        listingCounter++;
-        listings[listingCounter] =
-            Listing({seller: msg.sender, nftContract: nftContract, tokenId: tokenId, price: price, active: true});
-
-        nft.safeTransferFrom(msg.sender, address(this), tokenId);
-
-        emit NFTListed(listingCounter, msg.sender, nftContract, tokenId, price);
-
-        return listingCounter;
+    /// @notice Stores a USD-denominated listing and converts it through the configured Chainlink feed at purchase time.
+    function listNFTWithUsdPrice(address nftContract, uint256 tokenId, address tokenAddress, uint256 usdPrice)
+        external
+        nonReentrant
+        returns (uint256)
+    {
+        if (tokenAddress == address(0)) revert NativeTokenNotAllowed();
+        _requireActivePriceFeed(tokenAddress);
+        return _listNFT(nftContract, tokenId, tokenAddress, usdPrice, true);
     }
 
     function delistNFT(uint256 listingId) external nonReentrant {
@@ -144,71 +191,37 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
         Listing storage listing = listings[listingId];
 
         if (!listing.active) revert ListingNotActive();
-        if (msg.value != listing.price) revert IncorrectPayment();
         if (msg.sender == listing.seller) revert CannotBuyOwnNFT();
 
+        uint256 paymentAmount = listing.useUsdPrice ? quoteListing(listingId) : listing.price;
         listing.active = false;
 
-        _payoutSale(listing.nftContract, listing.tokenId, listing.seller, listing.price);
+        _collectPayment(listing.tokenAddress, paymentAmount);
+        _payoutSale(listing.tokenAddress, listing.nftContract, listing.tokenId, listing.seller, paymentAmount);
         IERC721(listing.nftContract).safeTransferFrom(address(this), msg.sender, listing.tokenId);
 
-        emit NFTSold(listingId, msg.sender, listing.seller, listing.price);
+        emit NFTSold(listingId, msg.sender, listing.seller, listing.tokenAddress, listing.price, paymentAmount);
     }
 
-    function createAuction(address nftContract, uint256 tokenId, uint256 startPrice, uint256 durationHours)
-        external
-        nonReentrant
-        returns (uint256)
-    {
-        if (nftContract == address(0)) revert ZeroAddress();
-        if (startPrice == 0) revert InvalidPrice();
-        if (durationHours <= 1) revert InvalidDuration();
-
-        IERC721 nft = IERC721(nftContract);
-        if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
-        if (!_isApprovedForMarketplace(nft, msg.sender, tokenId)) revert MarketplaceNotApproved();
-
-        auctionCounter++;
-        uint256 endTime = block.timestamp + durationHours * 1 hours;
-        auctions[auctionCounter] = Auction({
-            seller: msg.sender,
-            nftContract: nftContract,
-            tokenId: tokenId,
-            startPrice: startPrice,
-            highestBid: 0,
-            highestBidder: address(0),
-            endTime: endTime,
-            active: true
-        });
-
-        nft.safeTransferFrom(msg.sender, address(this), tokenId);
-
-        emit AuctionCreated(auctionCounter, msg.sender, nftContract, tokenId, startPrice, endTime);
-
-        return auctionCounter;
+    function createAuction(
+        address nftContract,
+        uint256 tokenId,
+        address tokenAddress,
+        uint256 startPrice,
+        uint256 durationHours
+    ) external nonReentrant returns (uint256) {
+        return _createAuction(nftContract, tokenId, tokenAddress, startPrice, durationHours);
     }
 
-    function placeBid(uint256 auctionId) external payable nonReentrant {
+    function placeBid(uint256 auctionId, uint256 bidAmount) external payable nonReentrant {
         Auction storage auction = auctions[auctionId];
-        if (!auction.active) revert AuctionNotActive();
-        if (auction.endTime <= block.timestamp) revert AuctionEndedAlready();
-        if (msg.sender == auction.seller) revert SellerCannotBid();
-
-        uint256 minBid = auction.startPrice;
-        if (auction.highestBid != 0) {
-            minBid = auction.highestBid + (auction.highestBid * MIN_BID_INCREMENT_BPS / BASIS_POINTS);
+        if (auction.tokenAddress == address(0)) {
+            if (msg.value != bidAmount) revert IncorrectPayment();
+        } else {
+            if (msg.value != 0) revert IncorrectPayment();
+            IERC20(auction.tokenAddress).safeTransferFrom(msg.sender, address(this), bidAmount);
         }
-
-        if (msg.value < minBid) revert BidTooLow();
-
-        if (auction.highestBidder != address(0)) {
-            pendingReturns[auctionId][auction.highestBidder] += auction.highestBid;
-        }
-
-        auction.highestBid = msg.value;
-        auction.highestBidder = msg.sender;
-
-        emit BidPlaced(auctionId, msg.sender, msg.value);
+        _placeBid(auctionId, bidAmount);
     }
 
     function endAuction(uint256 auctionId) external nonReentrant {
@@ -220,35 +233,51 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
 
         if (auction.highestBidder == address(0)) {
             IERC721(auction.nftContract).safeTransferFrom(address(this), auction.seller, auction.tokenId);
-            emit AuctionEnded(auctionId, address(0), 0);
+            emit AuctionEnded(auctionId, address(0), auction.tokenAddress, 0);
             return;
         }
 
         uint256 highestBid = auction.highestBid;
-        _payoutSale(auction.nftContract, auction.tokenId, auction.seller, highestBid);
+        _payoutSale(auction.tokenAddress, auction.nftContract, auction.tokenId, auction.seller, highestBid);
         IERC721(auction.nftContract).safeTransferFrom(address(this), auction.highestBidder, auction.tokenId);
 
-        emit AuctionEnded(auctionId, auction.highestBidder, highestBid);
+        emit AuctionEnded(auctionId, auction.highestBidder, auction.tokenAddress, highestBid);
     }
 
     function withdrawBid(uint256 auctionId) external nonReentrant {
+        Auction memory auction = auctions[auctionId];
         uint256 amount = pendingReturns[auctionId][msg.sender];
         if (amount == 0) revert NoPendingReturn();
 
         pendingReturns[auctionId][msg.sender] = 0;
+        _sendPayment(auction.tokenAddress, msg.sender, amount);
 
-        _sendValue(msg.sender, amount);
-
-        emit BidWithdrawn(auctionId, msg.sender, amount);
+        emit BidWithdrawn(auctionId, msg.sender, auction.tokenAddress, amount);
     }
 
     function getListing(uint256 listingId)
         external
         view
-        returns (address seller, address nftContract, uint256 tokenId, uint256 price, bool active)
+        returns (
+            address seller,
+            address nftContract,
+            uint256 tokenId,
+            address tokenAddress,
+            uint256 price,
+            bool useUsdPrice,
+            bool active
+        )
     {
         Listing memory listing = listings[listingId];
-        return (listing.seller, listing.nftContract, listing.tokenId, listing.price, listing.active);
+        return (
+            listing.seller,
+            listing.nftContract,
+            listing.tokenId,
+            listing.tokenAddress,
+            listing.price,
+            listing.useUsdPrice,
+            listing.active
+        );
     }
 
     function getAuction(uint256 auctionId)
@@ -258,6 +287,7 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
             address seller,
             address nftContract,
             uint256 tokenId,
+            address tokenAddress,
             uint256 startPrice,
             uint256 highestBid,
             address highestBidder,
@@ -270,12 +300,69 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
             auction.seller,
             auction.nftContract,
             auction.tokenId,
+            auction.tokenAddress,
             auction.startPrice,
             auction.highestBid,
             auction.highestBidder,
             auction.endTime,
             auction.active
         );
+    }
+
+    function setPaymentTokenAllowed(address tokenAddress, bool allowed) external onlyOwner {
+        if (tokenAddress == address(0)) revert ZeroAddress();
+        paymentTokenAllowed[tokenAddress] = allowed;
+        emit PaymentTokenAllowedUpdated(tokenAddress, allowed);
+    }
+
+    function setPriceFeed(address tokenAddress, address feed, uint8 tokenDecimals, uint256 maxStaleness)
+        external
+        onlyOwner
+    {
+        if (feed == address(0)) revert ZeroAddress();
+
+        priceFeeds[tokenAddress] = PriceFeedConfig({
+            feed: AggregatorV3Interface(feed), tokenDecimals: tokenDecimals, maxStaleness: maxStaleness, active: true
+        });
+
+        emit PriceFeedConfigured(tokenAddress, feed, tokenDecimals, maxStaleness);
+    }
+
+    function setERC20PriceFeed(address tokenAddress, address feed, uint256 maxStaleness) external onlyOwner {
+        if (tokenAddress == address(0) || feed == address(0)) revert ZeroAddress();
+
+        uint8 tokenDecimals = IERC20Metadata(tokenAddress).decimals();
+        priceFeeds[tokenAddress] = PriceFeedConfig({
+            feed: AggregatorV3Interface(feed), tokenDecimals: tokenDecimals, maxStaleness: maxStaleness, active: true
+        });
+
+        emit PriceFeedConfigured(tokenAddress, feed, tokenDecimals, maxStaleness);
+    }
+
+    function disablePriceFeed(address tokenAddress) external onlyOwner {
+        priceFeeds[tokenAddress].active = false;
+        emit PriceFeedDisabled(tokenAddress);
+    }
+
+    function quoteListing(uint256 listingId) public view returns (uint256 tokenAmount) {
+        Listing memory listing = listings[listingId];
+        if (!listing.active) revert ListingNotActive();
+        if (!listing.useUsdPrice) return listing.price;
+
+        return quoteTokenAmount(listing.tokenAddress, listing.price);
+    }
+
+    /// @notice Converts an 18-decimal USD amount into the configured token amount by reading Chainlink latestRoundData.
+    function quoteTokenAmount(address tokenAddress, uint256 usdAmount) public view returns (uint256 tokenAmount) {
+        PriceFeedConfig memory config = priceFeeds[tokenAddress];
+        if (!config.active) revert PriceFeedNotActive();
+
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = config.feed.latestRoundData();
+        if (answer <= 0 || answeredInRound < roundId) revert InvalidOraclePrice();
+        if (config.maxStaleness != 0 && block.timestamp - updatedAt > config.maxStaleness) revert StaleOraclePrice();
+
+        uint8 feedDecimals = config.feed.decimals();
+        return usdAmount * (10 ** feedDecimals) * (10 ** config.tokenDecimals) / uint256(answer) / 1e18;
     }
 
     function setPlatformFee(uint256 newFee) external {
@@ -304,7 +391,116 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    function _payoutSale(address nftContract, uint256 tokenId, address seller, uint256 salePrice) internal {
+    function _listNFT(address nftContract, uint256 tokenId, address tokenAddress, uint256 price, bool useUsdPrice)
+        private
+        returns (uint256)
+    {
+        _validateOrderInput(nftContract, tokenAddress, price);
+
+        IERC721 nft = IERC721(nftContract);
+        if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
+        if (!_isApprovedForMarketplace(nft, msg.sender, tokenId)) revert MarketplaceNotApproved();
+
+        listingCounter++;
+        listings[listingCounter] = Listing({
+            seller: msg.sender,
+            nftContract: nftContract,
+            tokenId: tokenId,
+            tokenAddress: tokenAddress,
+            price: price,
+            useUsdPrice: useUsdPrice,
+            active: true
+        });
+
+        nft.safeTransferFrom(msg.sender, address(this), tokenId);
+
+        emit NFTListed(listingCounter, msg.sender, nftContract, tokenId, tokenAddress, price, useUsdPrice);
+
+        return listingCounter;
+    }
+
+    function _createAuction(
+        address nftContract,
+        uint256 tokenId,
+        address tokenAddress,
+        uint256 startPrice,
+        uint256 durationHours
+    ) private returns (uint256) {
+        _validateOrderInput(nftContract, tokenAddress, startPrice);
+        if (durationHours <= 1) revert InvalidDuration();
+
+        IERC721 nft = IERC721(nftContract);
+        if (nft.ownerOf(tokenId) != msg.sender) revert NotOwner();
+        if (!_isApprovedForMarketplace(nft, msg.sender, tokenId)) revert MarketplaceNotApproved();
+
+        auctionCounter++;
+        uint256 endTime = block.timestamp + durationHours * 1 hours;
+        auctions[auctionCounter] = Auction({
+            seller: msg.sender,
+            nftContract: nftContract,
+            tokenId: tokenId,
+            tokenAddress: tokenAddress,
+            startPrice: startPrice,
+            highestBid: 0,
+            highestBidder: address(0),
+            endTime: endTime,
+            active: true
+        });
+
+        nft.safeTransferFrom(msg.sender, address(this), tokenId);
+
+        emit AuctionCreated(auctionCounter, msg.sender, nftContract, tokenId, tokenAddress, startPrice, endTime);
+
+        return auctionCounter;
+    }
+
+    function _placeBid(uint256 auctionId, uint256 bidAmount) private {
+        Auction storage auction = auctions[auctionId];
+        if (!auction.active) revert AuctionNotActive();
+        if (auction.endTime <= block.timestamp) revert AuctionEndedAlready();
+        if (msg.sender == auction.seller) revert SellerCannotBid();
+
+        uint256 minBid = auction.startPrice;
+        if (auction.highestBid != 0) {
+            // Keep every new bid at least 5% higher, so auctions cannot be extended by dust-size increases.
+            minBid = auction.highestBid + (auction.highestBid * MIN_BID_INCREMENT_BPS / BASIS_POINTS);
+        }
+
+        if (bidAmount < minBid) revert BidTooLow();
+
+        if (auction.highestBidder != address(0)) {
+            // Pull refunds avoid making an external call to the previous bidder during the new bid transaction.
+            pendingReturns[auctionId][auction.highestBidder] += auction.highestBid;
+        }
+
+        auction.highestBid = bidAmount;
+        auction.highestBidder = msg.sender;
+
+        emit BidPlaced(auctionId, msg.sender, auction.tokenAddress, bidAmount);
+    }
+
+    function _validateOrderInput(address nftContract, address tokenAddress, uint256 price) private view {
+        if (nftContract == address(0)) revert ZeroAddress();
+        if (price == 0) revert InvalidPrice();
+        if (tokenAddress != address(0) && !paymentTokenAllowed[tokenAddress]) revert PaymentTokenNotAllowed();
+    }
+
+    function _requireActivePriceFeed(address tokenAddress) private view {
+        if (!priceFeeds[tokenAddress].active) revert PriceFeedNotActive();
+    }
+
+    function _collectPayment(address tokenAddress, uint256 amount) private {
+        if (tokenAddress == address(0)) {
+            if (msg.value != amount) revert IncorrectPayment();
+        } else {
+            if (msg.value != 0) revert IncorrectPayment();
+            IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
+        }
+    }
+
+    function _payoutSale(address tokenAddress, address nftContract, uint256 tokenId, address seller, uint256 salePrice)
+        internal
+    {
         uint256 fee = salePrice * platformFee / BASIS_POINTS;
         (address receiver, uint256 royaltyAmount) = _getRoyaltyInfo(nftContract, tokenId, salePrice);
         if (fee + royaltyAmount > salePrice) revert InvalidRoyalty();
@@ -312,14 +508,14 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
         uint256 sellerAmount = salePrice - fee - royaltyAmount;
 
         if (receiver != address(0) && royaltyAmount > 0) {
-            _sendValue(receiver, royaltyAmount);
+            _sendPayment(tokenAddress, receiver, royaltyAmount);
         }
 
         if (fee > 0) {
-            _sendValue(feeRecipient, fee);
+            _sendPayment(tokenAddress, feeRecipient, fee);
         }
 
-        _sendValue(seller, sellerAmount);
+        _sendPayment(tokenAddress, seller, sellerAmount);
     }
 
     function _getRoyaltyInfo(address nftContract, uint256 tokenId, uint256 salePrice)
@@ -344,10 +540,18 @@ contract NFTMarketplaceUpgradeable is OwnableUpgradeable, UUPSUpgradeable, Reent
         return nft.getApproved(tokenId) == address(this) || nft.isApprovedForAll(tokenOwner, address(this));
     }
 
+    function _sendPayment(address tokenAddress, address recipient, uint256 amount) private {
+        if (tokenAddress == address(0)) {
+            _sendValue(recipient, amount);
+        } else {
+            IERC20(tokenAddress).safeTransfer(recipient, amount);
+        }
+    }
+
     function _sendValue(address recipient, uint256 amount) internal {
         (bool success,) = recipient.call{value: amount}("");
         if (!success) revert TransferFailed();
     }
 
-    uint256[50] private __gap;
+    uint256[45] private __gap;
 }

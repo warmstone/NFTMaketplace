@@ -7,10 +7,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {PandaNFT} from "../src/PandaNFT.sol";
-import {ChainlinkPriceOracle} from "../src/oracle/ChainlinkPriceOracle.sol";
 import {NFTMarketplaceUpgradeable} from "../src/upgradeable/NFTMarketplaceUpgradeable.sol";
-import {NFTMarketplaceUpgradeableV2} from "../src/upgradeable/NFTMarketplaceUpgradeableV2.sol";
-import {NFTMarketplaceUpgradeableV3} from "../src/upgradeable/NFTMarketplaceUpgradeableV3.sol";
 
 contract NFTMarketplaceUpgradeableTest is Test {
     NFTMarketplaceUpgradeable public marketplace;
@@ -46,6 +43,7 @@ contract NFTMarketplaceUpgradeableTest is Test {
         assertEq(marketplace.owner(), owner);
         assertEq(marketplace.feeRecipient(), feeRecipient);
         assertEq(marketplace.platformFee(), 250);
+        assertEq(marketplace.version(), "1.0.0");
     }
 
     function testImplementationCannotBeInitializedDirectly() public {
@@ -53,52 +51,48 @@ contract NFTMarketplaceUpgradeableTest is Test {
         implementation.initialize(owner, feeRecipient);
     }
 
-    function testOwnerCanUpgradeToV2AndKeepExistingState() public {
+    function testOwnerCanUpgradeAndKeepExistingState() public {
         uint256 tokenId = _mintAndApprove(address(marketplace), seller);
 
         vm.prank(seller);
-        uint256 listingId = marketplace.listNFT(address(pandaNFT), tokenId, 1 ether);
+        uint256 listingId = marketplace.listNFT(address(pandaNFT), tokenId, address(0), 1 ether);
 
-        NFTMarketplaceUpgradeableV2 v2Implementation = new NFTMarketplaceUpgradeableV2();
-        marketplace.upgradeToAndCall(address(v2Implementation), "");
+        NFTMarketplaceUpgradeable newImplementation = new NFTMarketplaceUpgradeable();
+        marketplace.upgradeToAndCall(address(newImplementation), "");
 
-        NFTMarketplaceUpgradeableV2 upgraded = NFTMarketplaceUpgradeableV2(address(marketplace));
-
-        assertEq(upgraded.version(), "2.0.0");
-        assertEq(upgraded.owner(), owner);
-        assertEq(upgraded.feeRecipient(), feeRecipient);
+        assertEq(marketplace.owner(), owner);
+        assertEq(marketplace.feeRecipient(), feeRecipient);
 
         vm.prank(buyer);
-        upgraded.buyNFT{value: 1 ether}(listingId);
+        marketplace.buyNFT{value: 1 ether}(listingId);
 
         assertEq(pandaNFT.ownerOf(tokenId), buyer);
     }
 
     function testNonOwnerCannotUpgrade() public {
-        NFTMarketplaceUpgradeableV2 v2Implementation = new NFTMarketplaceUpgradeableV2();
+        NFTMarketplaceUpgradeable newImplementation = new NFTMarketplaceUpgradeable();
 
         vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, buyer));
         vm.prank(buyer);
-        marketplace.upgradeToAndCall(address(v2Implementation), "");
+        marketplace.upgradeToAndCall(address(newImplementation), "");
     }
 
-    function testV2SupportsERC20FixedPricePurchaseAndPayouts() public {
-        NFTMarketplaceUpgradeableV2 upgraded = _upgradeToV2();
-        upgraded.setPaymentTokenAllowed(address(paymentToken), true);
+    function testERC20FixedPricePurchaseAndPayouts() public {
+        marketplace.setPaymentTokenAllowed(address(paymentToken), true);
 
-        uint256 tokenId = _mintAndApprove(address(upgraded), seller);
+        uint256 tokenId = _mintAndApprove(address(marketplace), seller);
         uint256 price = 100 ether;
 
         vm.prank(seller);
-        uint256 listingId = upgraded.listNFTWithPaymentToken(address(pandaNFT), tokenId, address(paymentToken), price);
+        uint256 listingId = marketplace.listNFT(address(pandaNFT), tokenId, address(paymentToken), price);
 
         paymentToken.mint(buyer, price);
 
         vm.prank(buyer);
-        paymentToken.approve(address(upgraded), price);
+        paymentToken.approve(address(marketplace), price);
 
         vm.prank(buyer);
-        upgraded.buyNFTWithPaymentToken(listingId);
+        marketplace.buyNFT(listingId);
 
         assertEq(pandaNFT.ownerOf(tokenId), buyer);
         assertEq(paymentToken.balanceOf(address(this)), 10 ether);
@@ -106,39 +100,37 @@ contract NFTMarketplaceUpgradeableTest is Test {
         assertEq(paymentToken.balanceOf(seller), 87.5 ether);
     }
 
-    function testV2SupportsERC20AuctionBidWithdrawalAndSettlement() public {
-        NFTMarketplaceUpgradeableV2 upgraded = _upgradeToV2();
-        upgraded.setPaymentTokenAllowed(address(paymentToken), true);
+    function testERC20AuctionBidWithdrawalAndSettlement() public {
+        marketplace.setPaymentTokenAllowed(address(paymentToken), true);
 
-        uint256 tokenId = _mintAndApprove(address(upgraded), seller);
+        uint256 tokenId = _mintAndApprove(address(marketplace), seller);
 
         vm.prank(seller);
-        uint256 auctionId =
-            upgraded.createAuctionWithPaymentToken(address(pandaNFT), tokenId, address(paymentToken), 100 ether, 2);
+        uint256 auctionId = marketplace.createAuction(address(pandaNFT), tokenId, address(paymentToken), 100 ether, 2);
 
         paymentToken.mint(buyer, 100 ether);
         paymentToken.mint(bidder, 105 ether);
 
         vm.prank(buyer);
-        paymentToken.approve(address(upgraded), 100 ether);
+        paymentToken.approve(address(marketplace), 100 ether);
         vm.prank(buyer);
-        upgraded.placeERC20Bid(auctionId, 100 ether);
+        marketplace.placeBid(auctionId, 100 ether);
 
         vm.prank(bidder);
-        paymentToken.approve(address(upgraded), 105 ether);
+        paymentToken.approve(address(marketplace), 105 ether);
         vm.prank(bidder);
-        upgraded.placeERC20Bid(auctionId, 105 ether);
+        marketplace.placeBid(auctionId, 105 ether);
 
-        assertEq(upgraded.erc20PendingReturns(auctionId, buyer), 100 ether);
+        assertEq(marketplace.pendingReturns(auctionId, buyer), 100 ether);
 
         vm.prank(buyer);
-        upgraded.withdrawERC20Bid(auctionId);
+        marketplace.withdrawBid(auctionId);
 
         assertEq(paymentToken.balanceOf(buyer), 100 ether);
-        assertEq(upgraded.erc20PendingReturns(auctionId, buyer), 0);
+        assertEq(marketplace.pendingReturns(auctionId, buyer), 0);
 
         vm.warp(block.timestamp + 2 hours + 1);
-        upgraded.endERC20Auction(auctionId);
+        marketplace.endAuction(auctionId);
 
         assertEq(pandaNFT.ownerOf(tokenId), bidder);
         assertEq(paymentToken.balanceOf(address(this)), 10.5 ether);
@@ -146,37 +138,34 @@ contract NFTMarketplaceUpgradeableTest is Test {
         assertEq(paymentToken.balanceOf(seller), 91.875 ether);
     }
 
-    function testV2RejectsUnapprovedPaymentToken() public {
-        NFTMarketplaceUpgradeableV2 upgraded = _upgradeToV2();
-        uint256 tokenId = _mintAndApprove(address(upgraded), seller);
+    function testRejectsUnapprovedPaymentToken() public {
+        uint256 tokenId = _mintAndApprove(address(marketplace), seller);
 
-        vm.expectRevert(NFTMarketplaceUpgradeableV2.PaymentTokenNotAllowed.selector);
+        vm.expectRevert(NFTMarketplaceUpgradeable.PaymentTokenNotAllowed.selector);
         vm.prank(seller);
-        upgraded.listNFTWithPaymentToken(address(pandaNFT), tokenId, address(paymentToken), 100 ether);
+        marketplace.listNFT(address(pandaNFT), tokenId, address(paymentToken), 100 ether);
     }
 
-    function testV3SupportsUsdPricedERC20PurchaseThroughOracle() public {
+    function testUsdPricedERC20PurchaseThroughChainlinkFeed() public {
         UpgradeableMockV3Aggregator feed = new UpgradeableMockV3Aggregator(8, 2_000e8);
-        ChainlinkPriceOracle oracle = new ChainlinkPriceOracle(owner);
-        oracle.setERC20Feed(address(paymentToken), address(feed), 1 hours);
 
-        NFTMarketplaceUpgradeableV3 upgraded = _upgradeToV3(address(oracle));
-        upgraded.setPaymentTokenAllowed(address(paymentToken), true);
+        marketplace.setPaymentTokenAllowed(address(paymentToken), true);
+        marketplace.setERC20PriceFeed(address(paymentToken), address(feed), 1 hours);
 
-        uint256 tokenId = _mintAndApprove(address(upgraded), seller);
+        uint256 tokenId = _mintAndApprove(address(marketplace), seller);
 
         vm.prank(seller);
-        uint256 listingId = upgraded.listNFTWithUsdPrice(address(pandaNFT), tokenId, address(paymentToken), 100e18);
+        uint256 listingId = marketplace.listNFTWithUsdPrice(address(pandaNFT), tokenId, address(paymentToken), 100e18);
 
-        assertEq(upgraded.quoteUSDListing(listingId), 0.05 ether);
+        assertEq(marketplace.quoteListing(listingId), 0.05 ether);
 
         paymentToken.mint(buyer, 0.05 ether);
 
         vm.prank(buyer);
-        paymentToken.approve(address(upgraded), 0.05 ether);
+        paymentToken.approve(address(marketplace), 0.05 ether);
 
         vm.prank(buyer);
-        upgraded.buyNFTWithUsdPrice(listingId);
+        marketplace.buyNFT(listingId);
 
         assertEq(pandaNFT.ownerOf(tokenId), buyer);
         assertEq(paymentToken.balanceOf(address(this)), 0.005 ether);
@@ -184,17 +173,21 @@ contract NFTMarketplaceUpgradeableTest is Test {
         assertEq(paymentToken.balanceOf(seller), 0.04375 ether);
     }
 
-    function _upgradeToV2() private returns (NFTMarketplaceUpgradeableV2 upgraded) {
-        NFTMarketplaceUpgradeableV2 v2Implementation = new NFTMarketplaceUpgradeableV2();
-        marketplace.upgradeToAndCall(address(v2Implementation), "");
-        upgraded = NFTMarketplaceUpgradeableV2(address(marketplace));
-    }
+    function testGettersExposeTokenAddressAndUsdFlag() public {
+        marketplace.setPaymentTokenAllowed(address(paymentToken), true);
+        uint256 tokenId = _mintAndApprove(address(marketplace), seller);
 
-    function _upgradeToV3(address oracle) private returns (NFTMarketplaceUpgradeableV3 upgraded) {
-        NFTMarketplaceUpgradeableV3 v3Implementation = new NFTMarketplaceUpgradeableV3();
-        bytes memory initData = abi.encodeCall(NFTMarketplaceUpgradeableV3.initializeV3, (oracle));
-        marketplace.upgradeToAndCall(address(v3Implementation), initData);
-        upgraded = NFTMarketplaceUpgradeableV3(address(marketplace));
+        vm.prank(seller);
+        uint256 listingId = marketplace.listNFT(address(pandaNFT), tokenId, address(paymentToken), 100 ether);
+
+        (,, uint256 returnedTokenId, address tokenAddress, uint256 price, bool useUsdPrice, bool active) =
+            marketplace.getListing(listingId);
+
+        assertEq(returnedTokenId, tokenId);
+        assertEq(tokenAddress, address(paymentToken));
+        assertEq(price, 100 ether);
+        assertFalse(useUsdPrice);
+        assertTrue(active);
     }
 
     function _mintAndApprove(address operator, address tokenOwner) private returns (uint256 tokenId) {
