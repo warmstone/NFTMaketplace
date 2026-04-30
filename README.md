@@ -8,11 +8,6 @@
 - `NFTMarketplace`：原始 ETH 版市场合约，保留固定价格购买、拍卖、平台费和版税结算。
 - `NFTMarketplaceUpgradeable`：UUPS 可升级市场第一版，已经内置 ETH/ERC20 支付、ERC20 出价和 Chainlink 价格源报价。
 
-升级版市场通过 `Listing.tokenAddress` 和 `Auction.tokenAddress` 区分支付资产：
-
-- `address(0)` 表示原生 ETH。
-- 非 0 地址表示 ERC20 Token，Token 需要先由 owner 加入白名单。
-
 ## 目录结构
 
 ```text
@@ -22,9 +17,6 @@ NFTMarketplace/
 |   |-- NFTMarketplace.sol
 |   `-- upgradeable/
 |       `-- NFTMarketplaceUpgradeable.sol
-|-- lib/
-|   `-- chainlink/
-|       `-- contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol
 |-- test/
 |   |-- PandaNFTTest.t.sol
 |   |-- NFTMarketplaceTest.t.sol
