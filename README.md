@@ -110,6 +110,18 @@ forge script script/DeployNFTMarketplaceUpgradeable.s.sol:DeployNFTMarketplaceUp
   --broadcast
 ```
 
+部署 `PandaCoin`
+
+```bash
+forge script script/DeployPandaCoin.s.sol \
+  --rpc-url sepolia \
+  --private-key $PRIVATE_KEY \
+  -- broadcast \
+  --verify \
+  --etherscan-api-key $ETHERSCAN_API_KEY \
+  --slow
+```
+
 ## 测试覆盖
 
 当前测试覆盖：
